@@ -1,0 +1,22 @@
+name: pinn_thermique
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1  # À adapter selon la version CUDA des nœuds de votre cluster SLURM
+  - numpy
+  - scipy
+  - matplotlib
+  - seaborn
+  - jupyter
+  - pip
+  - pip:
+    - gradio
+    - tqdm
+    - pyDOE  # Utile pour le Latin Hypercube Sampling (échantillonnage des points de collocation)
