@@ -9,7 +9,7 @@ dependencies:
   - pytorch
   - torchvision
   - torchaudio
-  - pytorch-cuda=12.1  # À adapter selon la version CUDA des nœuds de votre cluster SLURM
+  #- pytorch-cuda=12.1  # À adapter selon la version CUDA des nœuds de votre cluster SLURM
   - numpy
   - scipy
   - matplotlib
@@ -19,4 +19,4 @@ dependencies:
   - pip:
     - gradio
     - tqdm
-    - pyDOE  # Utile pour le Latin Hypercube Sampling (échantillonnage des points de collocation)
+    #- pyDOE  # Utile pour le Latin Hypercube Sampling (échantillonnage des points de collocation)

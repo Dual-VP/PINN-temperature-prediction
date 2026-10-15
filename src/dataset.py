@@ -1,6 +1,18 @@
 import torch
 import numpy as np
-from pydoe import lhs
+# from pydoe import lhs
+
+def lhs(dimensions, samples):
+    """Génère un échantillonnage Latin Hypercube dans [0, 1]."""
+    result = np.empty((samples, dimensions))
+
+    for dimension in range(dimensions):
+        permutation = np.random.permutation(samples)
+        result[:, dimension] = (
+            permutation + np.random.random(samples)
+        ) / samples
+
+    return result
 
 class ThermalDataset:
     """
