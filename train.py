@@ -4,14 +4,24 @@ from dataset import ThermalDataset
 from model import HeatPINN
 
 
-def train_pinn():
+def _batch(data, indices):
+    return tuple(value[indices] for value in data)
+
+
+def train_pinn(
+        epochs_adam=3,
+        batch_size_ic=2048,
+        batch_size_bc=2048,
+        batch_size_res=16384,
+        use_lbfgs=True,
+):
     # 1. Configuration du device (essentiel pour le cluster SLURM)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Entraînement lancé sur : {device}")
 
     # 2. Génération des données
     print("Génération des points de collocation...")
-    dataset = ThermalDataset(N_ic=2000, N_bc=2000, N_res=10000)
+    dataset = ThermalDataset(N_ic=8192, N_bc=8192, N_res=65536)
     ic_data_cpu, bc_data_cpu, res_data_cpu = dataset.generate_data()
 
     # Fonction utilitaire pour envoyer les tuples de tenseurs sur le GPU/CPU
@@ -31,28 +41,72 @@ def train_pinn():
     # ==========================================
     # PHASE 1 : Optimiseur ADAM
     # ==========================================
-    epochs_adam = 3
-    optimizer_adam = optim.Adam(model.parameters(), lr=1e-3)
+    # Pour Adam, la règle en racine carrée est plus stable que la règle
+    # linéaire lorsque la taille des mini-batchs augmente.
+    reference_batch_size = 10000
+    adam_lr = 1e-3 * (batch_size_res / reference_batch_size) ** 0.5
+    optimizer_adam = optim.Adam(model.parameters(), lr=adam_lr)
+    print(
+        f"Mini-batchs IC/BC/résidu : {batch_size_ic}/{batch_size_bc}/{batch_size_res}"
+    )
+    print(f"Learning rate Adam ajusté : {adam_lr:.2e}")
 
     print(f"\n--- Début de la phase 1 : ADAM ({epochs_adam} epochs) ---")
     for epoch in range(epochs_adam):
-        optimizer_adam.zero_grad()
+        permutations = [
+            torch.randperm(data[0].shape[0], device=device)
+            for data in (ic_data, bc_data, res_data)
+        ]
+        n_steps = max(
+            (ic_data[0].shape[0] + batch_size_ic - 1) // batch_size_ic,
+            (bc_data[0].shape[0] + batch_size_bc - 1) // batch_size_bc,
+            (res_data[0].shape[0] + batch_size_res - 1) // batch_size_res,
+        )
+        losses = []
 
-        # Calcul de la perte
-        loss, (l_ic, l_bc, l_res) = model.compute_loss(ic_data, bc_data, res_data, loss_weights)
+        for step in range(n_steps):
+            optimizer_adam.zero_grad(set_to_none=True)
+            ic_start = (step * batch_size_ic) % ic_data[0].shape[0]
+            bc_start = (step * batch_size_bc) % bc_data[0].shape[0]
+            res_start = (step * batch_size_res) % res_data[0].shape[0]
 
-        # Rétropropagation
-        loss.backward()
-        optimizer_adam.step()
+            ic_indices = permutations[0][ic_start:ic_start + batch_size_ic]
+            bc_indices = permutations[1][bc_start:bc_start + batch_size_bc]
+            res_indices = permutations[2][res_start:res_start + batch_size_res]
+            loss, (l_ic, l_bc, l_res) = model.compute_loss(
+                _batch(ic_data, ic_indices),
+                _batch(bc_data, bc_indices),
+                _batch(res_data, res_indices),
+                loss_weights,
+            )
+            loss.backward()
+            optimizer_adam.step()
+            losses.append(loss.item())
 
         if epoch % 500 == 0:
             print(
-                f"Adam Epoch {epoch:04d} | Loss Globale: {loss.item():.4e} | IC: {l_ic:.4e} | BC: {l_bc:.4e} | EDP: {l_res:.4e}")
+                f"Adam Epoch {epoch:04d} | Loss Globale: {sum(losses) / len(losses):.4e} "
+                f"| IC: {l_ic:.4e} | BC: {l_bc:.4e} | EDP: {l_res:.4e}"
+            )
 
     # ==========================================
     # PHASE 2 : Optimiseur L-BFGS
     # ==========================================
-    # L-BFGS nécessite une fonction "closure" qui recalcule la perte à chaque itération interne
+    if not use_lbfgs:
+        torch.save(model.state_dict(), "heat_pinn_model.pth")
+        print("\nEntraînement terminé. Modèle sauvegardé sous 'heat_pinn_model.pth'.")
+        return
+
+    # Une fermeture L-BFGS doit rester déterministe. On utilise donc un
+    # mini-batch fixe afin d'éviter de conserver tout le résidu en mémoire GPU.
+    lbfgs_batch_size = min(batch_size_res, res_data[0].shape[0])
+    lbfgs_res_data = _batch(res_data, torch.arange(lbfgs_batch_size, device=device))
+    lbfgs_ic_data = _batch(
+        ic_data, torch.arange(min(batch_size_ic, ic_data[0].shape[0]), device=device)
+    )
+    lbfgs_bc_data = _batch(
+        bc_data, torch.arange(min(batch_size_bc, bc_data[0].shape[0]), device=device)
+    )
     epochs_lbfgs = 5
     optimizer_lbfgs = optim.LBFGS(
         model.parameters(),
@@ -71,7 +125,9 @@ def train_pinn():
     def closure():
         nonlocal lbfgs_iter
         optimizer_lbfgs.zero_grad()
-        loss, (l_ic, l_bc, l_res) = model.compute_loss(ic_data, bc_data, res_data, loss_weights)
+        loss, (l_ic, l_bc, l_res) = model.compute_loss(
+            lbfgs_ic_data, lbfgs_bc_data, lbfgs_res_data, loss_weights
+        )
         loss.backward()
 
         if lbfgs_iter % 100 == 0:
